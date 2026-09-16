@@ -386,9 +386,9 @@ let currentCardId = null;
 let translationTimer = null;
 let audioCtx = null;
 
-let API_TYPE = localStorage.getItem('PRTS_TRANS_API_TYPE') || 'gemini';
+let API_TYPE = localStorage.getItem('PRTS_TRANS_API_TYPE') || 'openai';
 let API_KEY = localStorage.getItem('PRTS_TRANS_API_KEY') || '';
-let API_ENDPOINT = localStorage.getItem('PRTS_TRANS_ENDPOINT') || '';
+let API_ENDPOINT = localStorage.getItem('PRTS_TRANS_ENDPOINT') || 'https://api.qfgapi.com/v1';
 
 const streamContainer = document.getElementById('stream-container');
 const btnMainAction = document.getElementById('btnMainAction');
@@ -608,10 +608,12 @@ async function triggerTranslation(cardId, englishText) {
       });
 
       const data = await resp.json();
-      if (data.candidates && data.candidates[0].content.parts) {
+      if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) {
         translated = data.candidates[0].content.parts[0].text.trim();
+      } else if (data.error) {
+        translated = `Gemini报错: ${data.error.message || JSON.stringify(data.error)}`;
       } else {
-        translated = "翻译解析异常";
+        translated = `解析异常: ${JSON.stringify(data).slice(0, 80)}`;
       }
     } else {
       // OpenAI / 第三方中转格式
@@ -638,10 +640,12 @@ async function triggerTranslation(cardId, englishText) {
       });
 
       const data = await resp.json();
-      if (data.choices && data.choices[0].message) {
+      if (data.choices && data.choices[0] && data.choices[0].message) {
         translated = data.choices[0].message.content.trim();
+      } else if (data.error) {
+        translated = `接口报错: ${data.error.message || JSON.stringify(data.error)}`;
       } else {
-        translated = "翻译返回异常";
+        translated = `翻译返回异常: ${JSON.stringify(data).slice(0, 80)}`;
       }
     }
 
@@ -651,7 +655,7 @@ async function triggerTranslation(cardId, englishText) {
     saveToHistory(card.querySelector('.bubble-time').innerText, englishText, translated);
   } catch (err) {
     console.error("Translation fail:", err);
-    zhElem.innerText = "网络抖动，保留英文原文";
+    zhElem.innerText = `网络异常: ${err.message || '跨域或断网'}`;
     zhElem.classList.remove('translating');
   }
 }
