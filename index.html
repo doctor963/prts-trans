@@ -529,7 +529,7 @@ function createRecognitionInstance() {
 }
 
 // -------------------------------------------------------------
-// 4. 双语卡片展示与意群断句
+// 4. 双语卡片展示与意群快速断句 (说一句、翻一句)
 // -------------------------------------------------------------
 function getCurrentTimeStr() {
   const now = new Date();
@@ -560,24 +560,41 @@ function handleTranscriptUpdate(finalText, interimText) {
     }
   }
 
+  // 1. Web Speech 确定完整断句 (finalText) 时，立即触发翻译
   if (finalText) {
-    triggerTranslation(currentCardId, finalText.trim());
+    const cid = currentCardId;
+    const text = finalText.trim();
     currentCardId = null;
-  } else {
     clearTimeout(translationTimer);
-    translationTimer = setTimeout(() => {
-      if (currentCardId) {
-        const card = document.getElementById(currentCardId);
-        if (card) {
-          const enText = card.querySelector('.bubble-en').innerText.trim();
-          if (enText.length >= 6) {
-            triggerTranslation(currentCardId, enText);
-            currentCardId = null;
-          }
+    triggerTranslation(cid, text);
+    return;
+  }
+
+  // 2. 标点符号即时断句（句号、问号、感叹号）：无需等待静默
+  if (/[.?!]\s*$/.test(interimText.trim()) && interimText.trim().split(/\s+/).length >= 3) {
+    const cid = currentCardId;
+    const text = interimText.trim();
+    currentCardId = null;
+    clearTimeout(translationTimer);
+    triggerTranslation(cid, text);
+    return;
+  }
+
+  // 3. 静默断句缩短到 500ms，短句换气即出
+  clearTimeout(translationTimer);
+  translationTimer = setTimeout(() => {
+    if (currentCardId) {
+      const card = document.getElementById(currentCardId);
+      if (card) {
+        const enText = card.querySelector('.bubble-en').innerText.trim();
+        if (enText.length >= 5) {
+          const cid = currentCardId;
+          currentCardId = null;
+          triggerTranslation(cid, enText);
         }
       }
-    }, 1300);
-  }
+    }
+  }, 500);
 }
 
 // -------------------------------------------------------------
@@ -641,10 +658,13 @@ async function triggerTranslation(cardId, englishText) {
         body: JSON.stringify({
           model: chosenModel,
           messages: [
-            { role: "system", content: promptSystem },
-            { role: "user", content: `讲师原句: "${englishText}"` }
+            { 
+              role: "user", 
+              content: `Instructions: You are a professional simultaneous interpreter for university lectures. Translate the following spoken English into natural, fluent Simplified Chinese. Output ONLY the plain translation without any commentary, markdown, or quotation marks.\n\nEnglish: ${englishText}` 
+            }
           ],
-          temperature: 0.3
+          max_tokens: 150,
+          temperature: 0.1
         })
       });
 
