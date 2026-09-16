@@ -353,7 +353,7 @@
       <span id="zhStatus" style="font-size:10px; color:var(--accent-blue);">准备就绪</span>
     </div>
     <div class="pane-body" id="zhPane">
-      <span id="zhConfirmed"></span><span id="zhPending" class="pending-indicator"></span>
+      <span id="zhConfirmed"></span><span id="zhLiveRevision" style="color:var(--accent-blue); font-weight:600;"></span><span id="zhPending" class="pending-indicator"></span>
     </div>
   </div>
 </main>
@@ -568,130 +568,149 @@ function getCurrentTimeStr() {
 }
 
 // -------------------------------------------------------------
-// 4. 商科学术级意群流式同传引擎 (带上下文前置记忆 + 完整意群切分)
+// 4. 商科学术级动态校勘同传引擎（Speculative In-Place Revision）
 // -------------------------------------------------------------
 const enPane = document.getElementById('enPane');
 const zhPane = document.getElementById('zhPane');
 const enConfirmedElem = document.getElementById('enConfirmed');
 const enInterimElem = document.getElementById('enInterim');
 const zhConfirmedElem = document.getElementById('zhConfirmed');
+const zhLiveRevision = document.getElementById('zhLiveRevision');
 const zhPendingElem = document.getElementById('zhPending');
 const zhStatus = document.getElementById('zhStatus');
 
-let confirmedSentencesEn = ''; // 已确认英文文本
-let translatedWordsPointer = 0; // 已完成翻译的单词游标
-let isTranslating = false;      // 翻译并发锁
-let recentContextEn = '';       // 前文语义记忆缓存（提供给大模型理解上下文）
+let confirmedEnglishText = '';     // 已定稿英文历史长文
+let currentActiveSentenceEn = '';  // 当前正在演进的这句英文（实时变化）
+let currentActiveTranslationZh = ''; // 当前活跃句子的中文草稿（随语境动态重写润色）
+let isTranslating = false;         // 翻译通道锁
+let needsRevision = false;         // 是否有更新的英文待润色标记
 
 function handleSpeechStream(totalFinal, totalInterim) {
-  // 1. 上半屏：实时流畅记录英文（已确认 + 正在说）
+  // 1. 上半屏：英文长卷实时更新
   enConfirmedElem.innerText = totalFinal;
   enInterimElem.innerText = totalInterim ? (' ' + totalInterim) : '';
   enPane.scrollTop = enPane.scrollHeight;
 
-  // 2. 意群切分调度（Sense-Unit Chunking）
-  // 不切碎片单字，而是按商科课堂真实的“意群 / 短分句”切分：
-  // 触发条件：遇到完整标点符号，或者未翻译单词达到 8~14 个词（一个完整的商业/学术概念短句）
-  const fullText = (totalFinal + ' ' + totalInterim).trim();
-  const words = fullText.split(/\s+/).filter(w => w.length > 0);
-  const pendingWords = words.slice(translatedWordsPointer);
-  const pendingText = pendingWords.join(' ');
+  // 2. 活跃句子跟踪与定稿判定
+  // 如果 totalFinal 比之前确认的长，说明讲师刚结束了一句话
+  if (totalFinal.length > confirmedEnglishText.length) {
+    const newlyCompletedSentence = totalFinal.slice(confirmedEnglishText.length).trim();
+    confirmedEnglishText = totalFinal;
 
-  // 条件 A: 包含了天然停顿标点（. ? ! ; ,），且积攒了至少 4 个单词
-  const hasClausePunctuation = /[.,?!;:]/.test(pendingText);
-  if (pendingWords.length >= 4 && hasClausePunctuation) {
-    clearTimeout(translationTimer);
-    commitChunkAndTranslate(pendingWords, words);
-    return;
+    if (newlyCompletedSentence) {
+      // 当前活跃中文直接定稿封存入历史
+      finalizeActiveSentence(newlyCompletedSentence);
+    }
   }
 
-  // 条件 B: 讲师语速较快未打标点，但累积了 10 个以上单词（足够形成独立学术意群）
-  if (pendingWords.length >= 10) {
-    clearTimeout(translationTimer);
-    commitChunkAndTranslate(pendingWords, words);
-    return;
+  // 3. 当前句子的动态识别与实时润色重铸
+  // 讲师正在说的最新未定稿句子（包含已吐出但未定稿的词汇）
+  const activeEn = totalInterim.trim();
+  if (activeEn && activeEn !== currentActiveSentenceEn) {
+    currentActiveSentenceEn = activeEn;
+    scheduleSentenceRevision();
   }
+}
 
-  // 条件 C: 讲师语速平缓或自然气口停顿（450ms），且已有至少 4 个单词
+// 调度动态校勘：防抖 260ms，讲师边说边微调
+function scheduleSentenceRevision() {
   clearTimeout(translationTimer);
   translationTimer = setTimeout(() => {
-    const currentWords = (totalFinal + ' ' + totalInterim).trim().split(/\s+/).filter(w => w.length > 0);
-    const currPending = currentWords.slice(translatedWordsPointer);
-    if (currPending.length >= 4) {
-      commitChunkAndTranslate(currPending, currentWords);
-    }
-  }, 450);
+    executeSentenceRevision();
+  }, 260);
 }
 
-function commitChunkAndTranslate(pendingWords, allWords) {
+async function executeSentenceRevision() {
   if (isTranslating) {
-    // 若当前正在请求大模型，稍候 150ms 再次调度，避免请求乱序和死锁
-    setTimeout(() => {
-      const reWords = (enConfirmedElem.innerText + ' ' + enInterimElem.innerText).trim().split(/\s+/).filter(w => w.length > 0);
-      const rePending = reWords.slice(translatedWordsPointer);
-      if (rePending.length >= 4) commitChunkAndTranslate(rePending, reWords);
-    }, 150);
+    needsRevision = true;
     return;
   }
 
-  const chunkText = pendingWords.join(' ');
-  translatedWordsPointer += pendingWords.length;
+  const enSentenceToRevise = currentActiveSentenceEn;
+  if (!enSentenceToRevise || enSentenceToRevise.length < 3) return;
 
   isTranslating = true;
-  zhStatus.innerText = "学术同传中...";
+  zhStatus.innerText = "动态润色中...";
   zhPendingElem.innerText = " ●";
 
-  // 将前文记忆一起送入，保证商科术语（如 opportunity cost, elasticity, marginal revenue）准确不被割裂
-  triggerAcademicTranslation(chunkText, recentContextEn)
-    .then((chineseText) => {
-      if (chineseText && !chineseText.startsWith('[')) {
-        const spacer = zhConfirmedElem.innerText.length > 0 ? ' ' : '';
-        zhConfirmedElem.innerText += (spacer + chineseText);
-        zhPane.scrollTop = zhPane.scrollHeight;
+  // 取前文最后 30 个词作为学术上下文锚点
+  const recentContext = confirmedEnglishText.split(/\s+/).slice(-30).join(' ');
 
-        // 滚动更新上下文记忆
-        recentContextEn = (recentContextEn + ' ' + chunkText).split(/\s+/).slice(-25).join(' ');
-        saveToHistory(getCurrentTimeStr(), chunkText, chineseText);
-      } else if (chineseText && chineseText.startsWith('[')) {
-        zhStatus.innerText = chineseText;
-      }
-    })
-    .catch((err) => {
-      console.error("Translation fail:", err);
-    })
-    .finally(() => {
-      isTranslating = false;
-      zhStatus.innerText = "准备就绪";
-      zhPendingElem.innerText = "";
+  try {
+    const revisedZh = await triggerRevisionTranslation(enSentenceToRevise, recentContext, currentActiveTranslationZh);
+    if (revisedZh && !revisedZh.startsWith('[')) {
+      currentActiveTranslationZh = revisedZh;
+      // 关键：就地更新当前句子的中文，结合前后文实时校准
+      const spacer = zhConfirmedElem.innerText.length > 0 ? ' ' : '';
+      zhLiveRevision.innerText = (spacer + currentActiveTranslationZh);
+      zhPane.scrollTop = zhPane.scrollHeight;
+    }
+  } catch (err) {
+    console.error("Revision error:", err);
+  } finally {
+    isTranslating = false;
+    zhStatus.innerText = "实时监听";
+    zhPendingElem.innerText = "";
 
-      // 检查执行期间讲师是否又说了新的意群
-      const nextWords = (enConfirmedElem.innerText + ' ' + enInterimElem.innerText).trim().split(/\s+/).filter(w => w.length > 0);
-      if (nextWords.length - translatedWordsPointer >= 6) {
-        setTimeout(() => {
-          const p = nextWords.slice(translatedWordsPointer);
-          if (p.length >= 4) commitChunkAndTranslate(p, nextWords);
-        }, 50);
-      }
-    });
+    // 如果在翻译期间讲师又说了新的词，立即再校勘一次
+    if (needsRevision || currentActiveSentenceEn !== enSentenceToRevise) {
+      needsRevision = false;
+      setTimeout(executeSentenceRevision, 60);
+    }
+  }
+}
+
+// 当讲师落音/系统定稿时：将润色后的最终译文固化入 zhConfirmed
+function finalizeActiveSentence(finalEnSentence) {
+  // 如果当前已有润色结果，直接固化；如果没有，最后发起一次终稿翻译
+  if (currentActiveTranslationZh) {
+    const spacer = zhConfirmedElem.innerText.length > 0 ? ' ' : '';
+    zhConfirmedElem.innerText += (spacer + currentActiveTranslationZh);
+    zhLiveRevision.innerText = '';
+    saveToHistory(getCurrentTimeStr(), finalEnSentence, currentActiveTranslationZh);
+    currentActiveTranslationZh = '';
+    currentActiveSentenceEn = '';
+    zhPane.scrollTop = zhPane.scrollHeight;
+  } else {
+    // 快速补翻终稿
+    const recentContext = confirmedEnglishText.split(/\s+/).slice(-30).join(' ');
+    triggerRevisionTranslation(finalEnSentence, recentContext, "")
+      .then((finalZh) => {
+        if (finalZh && !finalZh.startsWith('[')) {
+          const spacer = zhConfirmedElem.innerText.length > 0 ? ' ' : '';
+          zhConfirmedElem.innerText += (spacer + finalZh);
+          zhLiveRevision.innerText = '';
+          saveToHistory(getCurrentTimeStr(), finalEnSentence, finalZh);
+          zhPane.scrollTop = zhPane.scrollHeight;
+        }
+      })
+      .finally(() => {
+        currentActiveTranslationZh = '';
+        currentActiveSentenceEn = '';
+      });
+  }
 }
 
 // -------------------------------------------------------------
-// 5. 学术大模型专业同传接口 (专为商科/经济/学术设计)
+// 5. 学术大模型专业同传接口 (带自主对照校勘能力)
 // -------------------------------------------------------------
-async function triggerAcademicTranslation(englishText, contextText) {
+async function triggerRevisionTranslation(currentEn, contextEn, previousDraftZh) {
   if (!API_KEY) {
     return "【未配置 API Key】";
   }
 
-  const systemPrompt = `你是一名资深的大学全英文商科与经济学学术课堂同传译员。
-职责要求：
-1. 专业术语精确：将商科、经济学（如机会成本、边际效应、沉没成本、供求弹性、财务报表等）专业术语地道翻译，不得字面直译。
-2. 语句通顺自然：结合提供的学术前文上下文，将当前增量意群翻译为地道、连贯的中文学术语言。
-3. 严格规则：严禁输出任何解释、注释、括号说明或标点符号杂项，只输出纯粹的中文译文。`;
+  const systemPrompt = `你是一名顶级大学全英文商科与经济学学术课堂的同传专员。
+你拥有【即时校勘与修整】能力：
+1. 随着讲师句子的展开，你必须根据后文的新词和整体语法，实时校准并重写真正地道、通顺的学术中文。
+2. 精准转化专业概念（如机会成本、边际效应、供求弹性、公允价值、沉没成本等），杜绝字面直译。
+3. 严格规则：直接输出修正润色后的最终中文句子，严禁输出任何解释、注释、括号说明。`;
 
-  const userContent = contextText 
-    ? `[课堂学术前文]: "${contextText}"\n[当前讲师原话]: "${englishText}"\n请直接输出当前原话的专业中文同传：`
-    : `[当前讲师原话]: "${englishText}"\n请直接输出专业中文同传：`;
+  let userContent = `[学术前文脉络]: "${contextEn || '无'}"\n[当前讲师完整原话]: "${currentEn}"`;
+  if (previousDraftZh) {
+    userContent += `\n[上一版临时草稿]: "${previousDraftZh}"\n请结合讲师最新吐出的词汇与前后文逻辑，对这句中文进行修正润色，直接输出最佳整句译文：`;
+  } else {
+    userContent += `\n请直接输出地道专业的中文学术同传：`;
+  }
 
   try {
     if (API_TYPE === 'gemini') {
@@ -736,7 +755,7 @@ async function triggerAcademicTranslation(englishText, contextText) {
             { role: "system", content: systemPrompt },
             { role: "user", content: userContent }
           ],
-          max_tokens: 200,
+          max_tokens: 220,
           temperature: 0.1
         })
       });
