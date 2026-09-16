@@ -568,7 +568,7 @@ function getCurrentTimeStr() {
 }
 
 // -------------------------------------------------------------
-// 4. 分屏极致实时同传引擎（真正流式：边说边切词组送翻，绝不等停顿）
+// 4. 商科学术级意群流式同传引擎 (带上下文前置记忆 + 完整意群切分)
 // -------------------------------------------------------------
 const enPane = document.getElementById('enPane');
 const zhPane = document.getElementById('zhPane');
@@ -578,101 +578,120 @@ const zhConfirmedElem = document.getElementById('zhConfirmed');
 const zhPendingElem = document.getElementById('zhPending');
 const zhStatus = document.getElementById('zhStatus');
 
-let committedEnglish = '';      // 已经定稿（包括已被切片送翻）的英文全量
-let committedWordsCount = 0;    // 已翻译单词计数
-let isTranslating = false;      // 翻译通道并发锁
-let translationQueue = [];      // 待处理翻译任务队列
+let confirmedSentencesEn = ''; // 已确认英文文本
+let translatedWordsPointer = 0; // 已完成翻译的单词游标
+let isTranslating = false;      // 翻译并发锁
+let recentContextEn = '';       // 前文语义记忆缓存（提供给大模型理解上下文）
 
 function handleSpeechStream(totalFinal, totalInterim) {
-  // 实时英文全景 = 定稿文本 + 正在说的临时词
-  const fullSpokenEn = (totalFinal + ' ' + totalInterim).trim();
-
-  // 1. 上半屏：实时更新英文文本流
+  // 1. 上半屏：实时流畅记录英文（已确认 + 正在说）
   enConfirmedElem.innerText = totalFinal;
   enInterimElem.innerText = totalInterim ? (' ' + totalInterim) : '';
   enPane.scrollTop = enPane.scrollHeight;
 
-  // 2. 核心调度：基于全量英文单词流，切片实时同传
-  // 分割成单词数组，计算未送翻的新增单词
-  const allWords = fullSpokenEn.split(/\s+/).filter(w => w.length > 0);
-  const untranslatedWords = allWords.slice(committedWordsCount);
+  // 2. 意群切分调度（Sense-Unit Chunking）
+  // 不切碎片单字，而是按商科课堂真实的“意群 / 短分句”切分：
+  // 触发条件：遇到完整标点符号，或者未翻译单词达到 8~14 个词（一个完整的商业/学术概念短句）
+  const fullText = (totalFinal + ' ' + totalInterim).trim();
+  const words = fullText.split(/\s+/).filter(w => w.length > 0);
+  const pendingWords = words.slice(translatedWordsPointer);
+  const pendingText = pendingWords.join(' ');
 
-  // 策略 A: 只要说话过程中积攒了 4 个及以上新词，立即切片送翻！
-  if (untranslatedWords.length >= 4) {
-    const chunkWords = untranslatedWords.slice(0, 5);
-    const chunkText = chunkWords.join(' ');
-    committedWordsCount += chunkWords.length;
-    enqueueTranslation(chunkText);
+  // 条件 A: 包含了天然停顿标点（. ? ! ; ,），且积攒了至少 4 个单词
+  const hasClausePunctuation = /[.,?!;:]/.test(pendingText);
+  if (pendingWords.length >= 4 && hasClausePunctuation) {
+    clearTimeout(translationTimer);
+    commitChunkAndTranslate(pendingWords, words);
     return;
   }
 
-  // 策略 B: 遇到标点符号，立即切片送翻
-  if (untranslatedWords.length >= 2 && /[.,?!;]/.test(untranslatedWords[untranslatedWords.length - 1])) {
-    const chunkText = untranslatedWords.join(' ');
-    committedWordsCount += untranslatedWords.length;
-    enqueueTranslation(chunkText);
+  // 条件 B: 讲师语速较快未打标点，但累积了 10 个以上单词（足够形成独立学术意群）
+  if (pendingWords.length >= 10) {
+    clearTimeout(translationTimer);
+    commitChunkAndTranslate(pendingWords, words);
     return;
   }
 
-  // 策略 C: 停顿换气兜底（280ms），哪怕只有 2 个词也立即触发翻译
+  // 条件 C: 讲师语速平缓或自然气口停顿（450ms），且已有至少 4 个单词
   clearTimeout(translationTimer);
   translationTimer = setTimeout(() => {
-    const currentAll = (totalFinal + ' ' + totalInterim).trim().split(/\s+/).filter(w => w.length > 0);
-    const pending = currentAll.slice(committedWordsCount);
-    if (pending.length >= 2) {
-      const chunkText = pending.join(' ');
-      committedWordsCount += pending.length;
-      enqueueTranslation(chunkText);
+    const currentWords = (totalFinal + ' ' + totalInterim).trim().split(/\s+/).filter(w => w.length > 0);
+    const currPending = currentWords.slice(translatedWordsPointer);
+    if (currPending.length >= 4) {
+      commitChunkAndTranslate(currPending, currentWords);
     }
-  }, 280);
+  }, 450);
 }
 
-function enqueueTranslation(text) {
-  if (!text || !text.trim()) return;
-  translationQueue.push(text.trim());
-  processTranslationQueue();
-}
+function commitChunkAndTranslate(pendingWords, allWords) {
+  if (isTranslating) {
+    // 若当前正在请求大模型，稍候 150ms 再次调度，避免请求乱序和死锁
+    setTimeout(() => {
+      const reWords = (enConfirmedElem.innerText + ' ' + enInterimElem.innerText).trim().split(/\s+/).filter(w => w.length > 0);
+      const rePending = reWords.slice(translatedWordsPointer);
+      if (rePending.length >= 4) commitChunkAndTranslate(rePending, reWords);
+    }, 150);
+    return;
+  }
 
-async function processTranslationQueue() {
-  if (isTranslating || translationQueue.length === 0) return;
+  const chunkText = pendingWords.join(' ');
+  translatedWordsPointer += pendingWords.length;
 
   isTranslating = true;
-  const chunkText = translationQueue.shift();
-
-  zhStatus.innerText = "同传中...";
+  zhStatus.innerText = "学术同传中...";
   zhPendingElem.innerText = " ●";
 
-  try {
-    const chinese = await triggerStreamTranslation(chunkText);
-    if (chinese && !chinese.startsWith('[')) {
-      const spacer = zhConfirmedElem.innerText.length > 0 ? ' ' : '';
-      zhConfirmedElem.innerText += (spacer + chinese);
-      zhPane.scrollTop = zhPane.scrollHeight;
-      saveToHistory(getCurrentTimeStr(), chunkText, chinese);
-    } else if (chinese && chinese.startsWith('[')) {
-      zhStatus.innerText = chinese;
-    }
-  } catch (e) {
-    console.error("Translation fail:", e);
-  } finally {
-    isTranslating = false;
-    zhStatus.innerText = translationQueue.length > 0 ? "同传中..." : "就绪";
-    zhPendingElem.innerText = translationQueue.length > 0 ? " ●" : "";
+  // 将前文记忆一起送入，保证商科术语（如 opportunity cost, elasticity, marginal revenue）准确不被割裂
+  triggerAcademicTranslation(chunkText, recentContextEn)
+    .then((chineseText) => {
+      if (chineseText && !chineseText.startsWith('[')) {
+        const spacer = zhConfirmedElem.innerText.length > 0 ? ' ' : '';
+        zhConfirmedElem.innerText += (spacer + chineseText);
+        zhPane.scrollTop = zhPane.scrollHeight;
 
-    // 持续吞吐队列中后续积攒的内容
-    if (translationQueue.length > 0) {
-      setTimeout(processTranslationQueue, 30);
-    }
-  }
+        // 滚动更新上下文记忆
+        recentContextEn = (recentContextEn + ' ' + chunkText).split(/\s+/).slice(-25).join(' ');
+        saveToHistory(getCurrentTimeStr(), chunkText, chineseText);
+      } else if (chineseText && chineseText.startsWith('[')) {
+        zhStatus.innerText = chineseText;
+      }
+    })
+    .catch((err) => {
+      console.error("Translation fail:", err);
+    })
+    .finally(() => {
+      isTranslating = false;
+      zhStatus.innerText = "准备就绪";
+      zhPendingElem.innerText = "";
+
+      // 检查执行期间讲师是否又说了新的意群
+      const nextWords = (enConfirmedElem.innerText + ' ' + enInterimElem.innerText).trim().split(/\s+/).filter(w => w.length > 0);
+      if (nextWords.length - translatedWordsPointer >= 6) {
+        setTimeout(() => {
+          const p = nextWords.slice(translatedWordsPointer);
+          if (p.length >= 4) commitChunkAndTranslate(p, nextWords);
+        }, 50);
+      }
+    });
 }
 
 // -------------------------------------------------------------
-// 5. 学术大模型同传翻译接口
+// 5. 学术大模型专业同传接口 (专为商科/经济/学术设计)
 // -------------------------------------------------------------
-async function triggerStreamTranslation(englishText) {
+async function triggerAcademicTranslation(englishText, contextText) {
   if (!API_KEY) {
     return "【未配置 API Key】";
   }
+
+  const systemPrompt = `你是一名资深的大学全英文商科与经济学学术课堂同传译员。
+职责要求：
+1. 专业术语精确：将商科、经济学（如机会成本、边际效应、沉没成本、供求弹性、财务报表等）专业术语地道翻译，不得字面直译。
+2. 语句通顺自然：结合提供的学术前文上下文，将当前增量意群翻译为地道、连贯的中文学术语言。
+3. 严格规则：严禁输出任何解释、注释、括号说明或标点符号杂项，只输出纯粹的中文译文。`;
+
+  const userContent = contextText 
+    ? `[课堂学术前文]: "${contextText}"\n[当前讲师原话]: "${englishText}"\n请直接输出当前原话的专业中文同传：`
+    : `[当前讲师原话]: "${englishText}"\n请直接输出专业中文同传：`;
 
   try {
     if (API_TYPE === 'gemini') {
@@ -685,7 +704,7 @@ async function triggerStreamTranslation(englishText) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [
-            { role: 'user', parts: [{ text: `You are a professional simultaneous interpreter for university lectures. Translate the following English speech increment into natural, fluent Simplified Chinese. Output ONLY the translated Chinese, without commentary, markdown, or punctuation extras.\n\nEnglish: "${englishText}"` }] }
+            { role: 'user', parts: [{ text: `${systemPrompt}\n\n${userContent}` }] }
           ]
         })
       });
@@ -714,10 +733,8 @@ async function triggerStreamTranslation(englishText) {
         body: JSON.stringify({
           model: chosenModel,
           messages: [
-            { 
-              role: "user", 
-              content: `You are a simultaneous interpreter for university classroom lectures. Translate the following spoken English into natural, continuous Simplified Chinese. Output ONLY the plain translation without any commentary, quotes, or conversational fill.\n\nEnglish: ${englishText}` 
-            }
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userContent }
           ],
           max_tokens: 200,
           temperature: 0.1
@@ -733,7 +750,7 @@ async function triggerStreamTranslation(englishText) {
       return "";
     }
   } catch (err) {
-    console.error("Translation fail:", err);
+    console.error("Academic translation fail:", err);
     return `[网络异常: ${err.message || '断网'}]`;
   }
 }
