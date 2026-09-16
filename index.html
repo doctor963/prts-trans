@@ -113,59 +113,79 @@
     100% { transform: scale(0.9); opacity: 0.7; }
   }
 
-  /* 核心文本流展示区：像小艺/豆包同传一样，双语瀑布式沉浸长卷 */
+  /* 核心分屏展示区：上英文，下中文，无限延伸的长卷 */
   #stream-container {
     flex: 1;
-    overflow-y: auto;
-    padding: 16px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    overflow: hidden;
+    background: var(--bg-dark);
+  }
+
+  .pane {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    position: relative;
+  }
+
+  .pane-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 14px;
+    background: rgba(255, 255, 255, 0.03);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    user-select: none;
+  }
+
+  .pane-top {
+    border-bottom: 2px solid rgba(0, 152, 220, 0.3);
+  }
+
+  .pane-body {
+    flex: 1;
+    overflow-y: auto;
     -webkit-overflow-scrolling: touch;
+    padding: 14px 16px;
+    font-size: 16px;
+    line-height: 1.6;
+    word-break: break-word;
     scroll-behavior: smooth;
   }
 
-  .subtitle-row {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 8px 0;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    transition: all 0.2s ease;
-  }
-
-  .subtitle-en {
-    font-size: 16px;
-    line-height: 1.45;
+  #enContent {
     color: var(--en-color);
-    word-break: break-word;
   }
 
-  .subtitle-zh {
-    font-size: 17px;
-    line-height: 1.5;
-    font-weight: 500;
-    color: var(--zh-color);
-    word-break: break-word;
-  }
-
-  .subtitle-row.active .subtitle-en {
+  #enContent .interim-text {
     color: #ffffff;
-  }
-
-  .subtitle-row.active .subtitle-zh {
-    color: var(--accent-blue);
-    font-weight: 600;
-  }
-
-  .subtitle-zh.translating {
-    opacity: 0.6;
+    opacity: 0.9;
     font-style: italic;
   }
 
-  @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(6px); }
-    to { opacity: 1; transform: translateY(0); }
+  #zhContent {
+    color: var(--zh-color);
+    font-weight: 500;
+  }
+
+  #zhContent .pending-indicator {
+    display: inline-block;
+    color: var(--accent-blue);
+    opacity: 0.7;
+    margin-left: 4px;
+    font-size: 13px;
+    animation: blink 1.2s infinite;
+  }
+
+  @keyframes blink {
+    0%, 100% { opacity: 0.2; }
+    50% { opacity: 1; }
   }
 
   /* 底部控制台 */
@@ -317,9 +337,24 @@
 </header>
 
 <main id="stream-container">
-  <div class="subtitle-row" style="opacity: 0.5;">
-    <div class="subtitle-en">Tap [开始听课] to capture classroom lectures in real-time.</div>
-    <div class="subtitle-zh">点击下方【开始听课】，手机将锁定屏幕常亮并开启同传字幕瀑布流。</div>
+  <div class="pane pane-top">
+    <div class="pane-header">
+      <span>ENGLISH TRANSCRIPT // 讲师英文实况</span>
+      <span style="font-size:10px; opacity:0.6;">实时转录</span>
+    </div>
+    <div class="pane-body" id="enPane">
+      <span id="enConfirmed"></span><span id="enInterim" class="interim-text"></span>
+    </div>
+  </div>
+
+  <div class="pane pane-bottom">
+    <div class="pane-header">
+      <span>CHINESE TRANSLATION // 实时同传译文</span>
+      <span id="zhStatus" style="font-size:10px; color:var(--accent-blue);">准备就绪</span>
+    </div>
+    <div class="pane-body" id="zhPane">
+      <span id="zhConfirmed"></span><span id="zhPending" class="pending-indicator"></span>
+    </div>
   </div>
 </main>
 
@@ -533,103 +568,100 @@ function getCurrentTimeStr() {
 }
 
 // -------------------------------------------------------------
-// 4. 连续双语同传流（小艺/豆包同传模式：不中断、去重追加、实时双语）
+// 4. 分屏连续流转引擎 (彻底告别气泡断句，上下全屏双流自适应延伸)
 // -------------------------------------------------------------
-let processedFinalLength = 0;
-let currentDraftRowId = null;
+const enPane = document.getElementById('enPane');
+const zhPane = document.getElementById('zhPane');
+const enConfirmedElem = document.getElementById('enConfirmed');
+const enInterimElem = document.getElementById('enInterim');
+const zhConfirmedElem = document.getElementById('zhConfirmed');
+const zhPendingElem = document.getElementById('zhPending');
+const zhStatus = document.getElementById('zhStatus');
+
+let accumulatedConfirmedEn = ''; // 已确认英文文本
+let translatedEnLength = 0;       // 已翻译的英文长度游标
+let isTranslating = false;        // 翻译请求并发锁
+let translationQueue = [];        // 待翻译文本队列
 
 function handleSpeechStream(totalFinal, totalInterim) {
-  // 1. 处理新增的已定稿英文 (final text)
-  if (totalFinal.length > processedFinalLength) {
-    const newlyConfirmed = totalFinal.slice(processedFinalLength).trim();
-    processedFinalLength = totalFinal.length;
+  // 1. 实时更新英文上半屏
+  // 如果识别引擎返回了新的定稿增量
+  if (totalFinal.length > accumulatedConfirmedEn.length) {
+    accumulatedConfirmedEn = totalFinal;
+    enConfirmedElem.innerText = accumulatedConfirmedEn;
+    enInterimElem.innerText = '';
+    enPane.scrollTop = enPane.scrollHeight;
 
-    if (newlyConfirmed) {
-      // 若当前有草稿行，直接复用当前草稿行作为这句定稿行
-      let targetRowId = currentDraftRowId;
-      if (!targetRowId) {
-        targetRowId = 'row_' + Date.now();
-        const row = document.createElement('div');
-        row.className = 'subtitle-row active';
-        row.id = targetRowId;
-        row.innerHTML = `
-          <div class="subtitle-en">${escapeHtml(newlyConfirmed)}</div>
-          <div class="subtitle-zh translating">正在翻译...</div>
-        `;
-        streamContainer.appendChild(row);
-      } else {
-        const row = document.getElementById(targetRowId);
-        if (row) {
-          row.querySelector('.subtitle-en').innerText = newlyConfirmed;
-        }
-      }
-
-      currentDraftRowId = null;
-      clearTimeout(translationTimer);
-      triggerTranslation(targetRowId, newlyConfirmed);
-      streamContainer.scrollTop = streamContainer.scrollHeight;
-    }
-  }
-
-  // 2. 处理当前正在说的临时英文 (interim text)
-  const draftText = totalInterim.trim();
-  if (draftText) {
-    if (!currentDraftRowId) {
-      currentDraftRowId = 'draft_' + Date.now();
-      const row = document.createElement('div');
-      row.className = 'subtitle-row active';
-      row.id = currentDraftRowId;
-      row.innerHTML = `
-        <div class="subtitle-en">${escapeHtml(draftText)}</div>
-        <div class="subtitle-zh translating">正在聆听...</div>
-      `;
-      streamContainer.appendChild(row);
-    } else {
-      const row = document.getElementById(currentDraftRowId);
-      if (row) {
-        row.querySelector('.subtitle-en').innerText = draftText;
-      }
-    }
-    streamContainer.scrollTop = streamContainer.scrollHeight;
-
-    // 停顿 600ms 快速触发这一小句的同传
-    clearTimeout(translationTimer);
-    translationTimer = setTimeout(() => {
-      if (currentDraftRowId) {
-        const row = document.getElementById(currentDraftRowId);
-        if (row) {
-          const en = row.querySelector('.subtitle-en').innerText.trim();
-          if (en.length >= 4) {
-            const cid = currentDraftRowId;
-            currentDraftRowId = null;
-            triggerTranslation(cid, en);
-          }
-        }
-      }
-    }, 600);
+    // 检查是否有未翻译的英文增量
+    checkAndTriggerTranslation();
+  } else {
+    // 正在说的临时词
+    enInterimElem.innerText = totalInterim ? (' ' + totalInterim) : '';
+    enPane.scrollTop = enPane.scrollHeight;
   }
 }
 
-// -------------------------------------------------------------
-// 5. 学术大模型同传请求
-// -------------------------------------------------------------
-async function triggerTranslation(rowId, englishText) {
-  const row = document.getElementById(rowId);
-  if (!row) return;
+// 检查并调度翻译：只要新增英文超过一定长度，或有停顿，就送入翻译管道
+function checkAndTriggerTranslation() {
+  const untranslated = accumulatedConfirmedEn.slice(translatedEnLength).trim();
+  if (!untranslated) return;
 
-  const zhElem = row.querySelector('.subtitle-zh');
+  // 如果积累了至少 20 个字符（或两三个词），或者设置了防抖
+  clearTimeout(translationTimer);
+  translationTimer = setTimeout(() => {
+    scheduleNextTranslationChunk();
+  }, 400);
+}
 
+function scheduleNextTranslationChunk() {
+  if (isTranslating) return;
+
+  const untranslated = accumulatedConfirmedEn.slice(translatedEnLength).trim();
+  if (!untranslated || untranslated.length < 3) return;
+
+  const chunkToTranslate = untranslated;
+  const chunkLength = accumulatedConfirmedEn.length - translatedEnLength;
+
+  isTranslating = true;
+  zhStatus.innerText = "正在同传...";
+  zhPendingElem.innerText = " ●";
+
+  triggerStreamTranslation(chunkToTranslate)
+    .then((chineseText) => {
+      if (chineseText) {
+        // 中文下半屏持续追加
+        const spacer = zhConfirmedElem.innerText.length > 0 ? ' ' : '';
+        zhConfirmedElem.innerText += (spacer + chineseText);
+        zhPane.scrollTop = zhPane.scrollHeight;
+
+        translatedEnLength += chunkLength;
+        saveToHistory(getCurrentTimeStr(), chunkToTranslate, chineseText);
+      }
+    })
+    .catch((err) => {
+      console.error("Translation stream error:", err);
+    })
+    .finally(() => {
+      isTranslating = false;
+      zhStatus.innerText = "准备就绪";
+      zhPendingElem.innerText = "";
+
+      // 如果翻译期间讲师又说了新的内容，立即紧跟继续翻
+      if (accumulatedConfirmedEn.length > translatedEnLength) {
+        setTimeout(scheduleNextTranslationChunk, 100);
+      }
+    });
+}
+
+// -------------------------------------------------------------
+// 5. 学术大模型同传翻译接口
+// -------------------------------------------------------------
+async function triggerStreamTranslation(englishText) {
   if (!API_KEY) {
-    zhElem.innerText = "【未配置 API Key，请在底部设置】";
-    zhElem.classList.remove('translating');
-    row.classList.remove('active');
-    saveToHistory(getCurrentTimeStr(), englishText, zhElem.innerText);
-    return;
+    return "【未配置 API Key】";
   }
 
   try {
-    let translated = "";
-
     if (API_TYPE === 'gemini') {
       const endpoint = API_ENDPOINT.trim() 
         ? `${API_ENDPOINT.replace(/\/$/, '')}/v1beta/models/gemini-1.5-flash:generateContent?key=${API_KEY}`
@@ -640,19 +672,18 @@ async function triggerTranslation(rowId, englishText) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [
-            { role: 'user', parts: [{ text: `Instructions: Translate the English speech into natural Simplified Chinese directly without comments.\n\nEnglish: "${englishText}"` }] }
+            { role: 'user', parts: [{ text: `You are a professional simultaneous interpreter for university lectures. Translate the following English speech increment into natural, fluent Simplified Chinese. Output ONLY the translated Chinese, without commentary, markdown, or punctuation extras.\n\nEnglish: "${englishText}"` }] }
           ]
         })
       });
 
       const data = await resp.json();
       if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) {
-        translated = data.candidates[0].content.parts[0].text.trim();
+        return data.candidates[0].content.parts[0].text.trim();
       } else if (data.error) {
-        translated = `报错: ${data.error.message || JSON.stringify(data.error)}`;
-      } else {
-        translated = `异常: ${JSON.stringify(data).slice(0, 50)}`;
+        return `[报错: ${data.error.message || 'Gemini异常'}]`;
       }
+      return "";
     } else {
       // OpenAI / 第三方中转格式
       const endpoint = API_ENDPOINT.trim()
@@ -672,34 +703,25 @@ async function triggerTranslation(rowId, englishText) {
           messages: [
             { 
               role: "user", 
-              content: `Instructions: You are a professional simultaneous interpreter for university lectures. Translate the following spoken English into natural, fluent Simplified Chinese. Output ONLY the plain translation without any commentary, markdown, or quotation marks.\n\nEnglish: ${englishText}` 
+              content: `You are a simultaneous interpreter for university classroom lectures. Translate the following spoken English into natural, continuous Simplified Chinese. Output ONLY the plain translation without any commentary, quotes, or conversational fill.\n\nEnglish: ${englishText}` 
             }
           ],
-          max_tokens: 150,
+          max_tokens: 200,
           temperature: 0.1
         })
       });
 
       const data = await resp.json();
       if (data.choices && data.choices[0] && data.choices[0].message) {
-        translated = data.choices[0].message.content.trim();
+        return data.choices[0].message.content.trim();
       } else if (data.error) {
-        translated = `接口报错: ${data.error.message || JSON.stringify(data.error)}`;
-      } else {
-        translated = `翻译返回异常: ${JSON.stringify(data).slice(0, 80)}`;
+        return `[接口报错: ${data.error.message || 'API异常'}]`;
       }
+      return "";
     }
-
-    zhElem.innerText = translated;
-    zhElem.classList.remove('translating');
-    row.classList.remove('active');
-    streamContainer.scrollTop = streamContainer.scrollHeight;
-    saveToHistory(getCurrentTimeStr(), englishText, translated);
   } catch (err) {
     console.error("Translation fail:", err);
-    zhElem.innerText = `网络异常: ${err.message || '跨域或断网'}`;
-    zhElem.classList.remove('translating');
-    row.classList.remove('active');
+    return `[网络异常: ${err.message || '断网'}]`;
   }
 }
 
