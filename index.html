@@ -568,7 +568,7 @@ function getCurrentTimeStr() {
 }
 
 // -------------------------------------------------------------
-// 4. 分屏实时增量同传引擎（不等讲完，边说边切词组送翻）
+// 4. 分屏极致实时同传引擎（只要有新词，不等句子，哪怕 interim 停顿立刻送翻）
 // -------------------------------------------------------------
 const enPane = document.getElementById('enPane');
 const zhPane = document.getElementById('zhPane');
@@ -578,55 +578,39 @@ const zhConfirmedElem = document.getElementById('zhConfirmed');
 const zhPendingElem = document.getElementById('zhPending');
 const zhStatus = document.getElementById('zhStatus');
 
-let accumulatedConfirmedEn = ''; // 已确认英文总文本
-let lastRawFinal = '';           // 上一次 final 文本快照
-let translatedEnLength = 0;       // 已翻译的英文长度游标
-let isTranslating = false;        // 翻译并发锁
+let accumulatedConfirmedEn = ''; // 已定稿英文
+let translatedEnLength = 0;       // 已定稿中已翻译长度
+let isTranslating = false;        // 翻译锁
 
 function handleSpeechStream(totalFinal, totalInterim) {
-  // 1. 上半屏：实时反映正在说的英文（已定稿 + 正在吐出的词）
-  if (totalFinal !== lastRawFinal) {
-    lastRawFinal = totalFinal;
-    accumulatedConfirmedEn = totalFinal;
-    enConfirmedElem.innerText = accumulatedConfirmedEn;
-  }
+  // 1. 上半屏：实时无缝追加
+  accumulatedConfirmedEn = totalFinal;
+  enConfirmedElem.innerText = accumulatedConfirmedEn;
   enInterimElem.innerText = totalInterim ? (' ' + totalInterim) : '';
   enPane.scrollTop = enPane.scrollHeight;
 
-  // 2. 实时同传调度：边说边翻
-  // 无论是在定稿还是在临时说话，只要尚未翻译的内容达到一个短语义块（约 6-8 个单词或遇到停顿/标点），立即送翻
-  dispatchIncrementalTranslation(totalFinal, totalInterim);
-}
-
-// 调度增量翻译
-function dispatchIncrementalTranslation(totalFinal, totalInterim) {
-  // 优先看已定稿中未翻部分
-  const confirmedUntranslated = accumulatedConfirmedEn.slice(translatedEnLength).trim();
-  
-  // 检查是否包含标点符号或词数已足够（>= 5个单词）
-  const words = confirmedUntranslated ? confirmedUntranslated.split(/\s+/) : [];
-  const hasPunctuation = /[.,?!;]/.test(confirmedUntranslated);
-
-  if (words.length >= 6 || hasPunctuation) {
+  // 2. 核心调度：
+  // 情况 A: 如果有尚未翻译的定稿文本 (final text)
+  const untranslatedFinal = accumulatedConfirmedEn.slice(translatedEnLength).trim();
+  if (untranslatedFinal.length >= 8 || /[.,?!;]/.test(untranslatedFinal)) {
     clearTimeout(translationTimer);
-    scheduleNextTranslationChunk();
+    triggerNextBatch();
     return;
   }
 
-  // 如果讲师语速平缓或有微小停顿 (350ms)，即使词数较少（>= 3个单词）也立即送翻
+  // 情况 B: 讲师在说话过程中（哪怕是临时 interim 词汇），只要有 300ms 气口，立刻触发
   clearTimeout(translationTimer);
   translationTimer = setTimeout(() => {
-    scheduleNextTranslationChunk();
-  }, 350);
+    triggerNextBatch();
+  }, 300);
 }
 
-function scheduleNextTranslationChunk() {
+function triggerNextBatch() {
   if (isTranslating) return;
 
   const untranslated = accumulatedConfirmedEn.slice(translatedEnLength).trim();
-  if (!untranslated || untranslated.length < 3) return;
+  if (!untranslated) return;
 
-  // 截取当前待翻译增量
   const chunkToTranslate = untranslated;
   const chunkLength = accumulatedConfirmedEn.length - translatedEnLength;
 
@@ -637,7 +621,6 @@ function scheduleNextTranslationChunk() {
   triggerStreamTranslation(chunkToTranslate)
     .then((chineseText) => {
       if (chineseText && !chineseText.startsWith('[')) {
-        // 中文下半屏平滑追加
         const spacer = zhConfirmedElem.innerText.length > 0 ? ' ' : '';
         zhConfirmedElem.innerText += (spacer + chineseText);
         zhPane.scrollTop = zhPane.scrollHeight;
@@ -645,7 +628,6 @@ function scheduleNextTranslationChunk() {
         translatedEnLength += chunkLength;
         saveToHistory(getCurrentTimeStr(), chunkToTranslate, chineseText);
       } else if (chineseText && chineseText.startsWith('[')) {
-        // 报错或提示
         zhStatus.innerText = chineseText;
       }
     })
@@ -654,12 +636,12 @@ function scheduleNextTranslationChunk() {
     })
     .finally(() => {
       isTranslating = false;
-      zhStatus.innerText = "准备就绪";
+      zhStatus.innerText = "就绪";
       zhPendingElem.innerText = "";
 
-      // 如果翻译执行期间又有新积累的词，无缝接续翻译
-      if (accumulatedConfirmedEn.length - translatedEnLength >= 4) {
-        setTimeout(scheduleNextTranslationChunk, 80);
+      // 如果翻译期间讲师又说了新的英文，立即紧随翻译下一段
+      if (accumulatedConfirmedEn.length > translatedEnLength) {
+        setTimeout(triggerNextBatch, 50);
       }
     });
 }
