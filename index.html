@@ -113,60 +113,53 @@
     100% { transform: scale(0.9); opacity: 0.7; }
   }
 
-  /* 核心文本流展示区 */
+  /* 核心文本流展示区：像小艺/豆包同传一样，双语瀑布式沉浸长卷 */
   #stream-container {
     flex: 1;
     overflow-y: auto;
     padding: 16px;
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    gap: 12px;
     -webkit-overflow-scrolling: touch;
     scroll-behavior: smooth;
   }
 
-  .bubble-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 14px 16px;
+  .subtitle-row {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    animation: fadeIn 0.25s ease-out forwards;
-    transition: border-color 0.3s;
+    gap: 4px;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    transition: all 0.2s ease;
   }
 
-  .bubble-card.live {
-    border-color: rgba(0, 152, 220, 0.4);
-    box-shadow: 0 2px 12px rgba(0, 152, 220, 0.08);
-  }
-
-  .bubble-time {
-    font-size: 10.5px;
-    color: var(--text-muted);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-
-  .bubble-en {
-    font-size: 15px;
+  .subtitle-en {
+    font-size: 16px;
     line-height: 1.45;
     color: var(--en-color);
     word-break: break-word;
   }
 
-  .bubble-zh {
-    font-size: 16px;
+  .subtitle-zh {
+    font-size: 17px;
     line-height: 1.5;
     font-weight: 500;
     color: var(--zh-color);
-    border-top: 1px dashed rgba(255, 255, 255, 0.08);
-    padding-top: 8px;
     word-break: break-word;
   }
 
-  .bubble-zh.translating {
-    color: var(--text-secondary);
+  .subtitle-row.active .subtitle-en {
+    color: #ffffff;
+  }
+
+  .subtitle-row.active .subtitle-zh {
+    color: var(--accent-blue);
+    font-weight: 600;
+  }
+
+  .subtitle-zh.translating {
+    opacity: 0.6;
     font-style: italic;
   }
 
@@ -324,10 +317,9 @@
 </header>
 
 <main id="stream-container">
-  <div class="bubble-card" style="border-style: dashed; border-color: rgba(255,255,255,0.1);">
-    <div class="bubble-time">SYSTEM STATUS</div>
-    <div class="bubble-en">Tap [开始听课] to capture classroom lectures in real-time.</div>
-    <div class="bubble-zh">点击下方【开始听课】，手机将自动锁定屏幕常亮并开启实时学术同传。</div>
+  <div class="subtitle-row" style="opacity: 0.5;">
+    <div class="subtitle-en">Tap [开始听课] to capture classroom lectures in real-time.</div>
+    <div class="subtitle-zh">点击下方【开始听课】，手机将锁定屏幕常亮并开启同传字幕瀑布流。</div>
   </div>
 </main>
 
@@ -542,98 +534,97 @@ function getCurrentTimeStr() {
   return now.toTimeString().split(' ')[0];
 }
 
-let activeLiveCardId = null;
+// -------------------------------------------------------------
+// 4. 双语同传字幕长卷 (小艺/豆包同款：无气泡、双语流式推进)
+// -------------------------------------------------------------
+let activeRowId = null;
 
-// 当讲师正在说某句话时的临时展示（只在一个活跃气泡内刷新文字，绝不新建气泡）
+// 当讲师正在吐词（正在说眼下这句）
 function handleInterimUpdate(text) {
   const clean = text.trim();
   if (!clean) return;
 
-  if (!activeLiveCardId) {
-    activeLiveCardId = 'card_' + Date.now();
-    const card = document.createElement('div');
-    card.className = 'bubble-card live';
-    card.id = activeLiveCardId;
-    card.innerHTML = `
-      <div class="bubble-time">${getCurrentTimeStr()}</div>
-      <div class="bubble-en">${escapeHtml(clean)}</div>
-      <div class="bubble-zh translating">正在聆听...</div>
+  if (!activeRowId) {
+    activeRowId = 'row_' + Date.now();
+    const row = document.createElement('div');
+    row.className = 'subtitle-row active';
+    row.id = activeRowId;
+    row.innerHTML = `
+      <div class="subtitle-en">${escapeHtml(clean)}</div>
+      <div class="subtitle-zh translating">正在翻译...</div>
     `;
-    streamContainer.appendChild(card);
+    streamContainer.appendChild(row);
   } else {
-    const card = document.getElementById(activeLiveCardId);
-    if (card) {
-      card.querySelector('.bubble-en').innerText = clean;
+    const row = document.getElementById(activeRowId);
+    if (row) {
+      row.querySelector('.subtitle-en').innerText = clean;
     }
   }
   streamContainer.scrollTop = streamContainer.scrollHeight;
 
-  // 如果讲师中间换气停顿 (600ms)，将当前这句定稿并翻译，然后释放气泡锁定
+  // 停顿短暂停歇时触发翻译
   clearTimeout(translationTimer);
   translationTimer = setTimeout(() => {
-    if (activeLiveCardId) {
-      const card = document.getElementById(activeLiveCardId);
-      if (card) {
-        const enText = card.querySelector('.bubble-en').innerText.trim();
+    if (activeRowId) {
+      const row = document.getElementById(activeRowId);
+      if (row) {
+        const enText = row.querySelector('.subtitle-en').innerText.trim();
         if (enText.length >= 4) {
-          const targetId = activeLiveCardId;
-          activeLiveCardId = null;
+          const targetId = activeRowId;
+          activeRowId = null;
           triggerTranslation(targetId, enText);
         }
       }
     }
-  }, 600);
+  }, 500);
 }
 
-// 当系统确定是一句完整的句子时：定稿翻译并解锁下一个气泡
+// 讲师一句话完成定稿
 function handleFinalSentence(sentence) {
   const clean = sentence.trim();
   if (!clean) return;
 
   clearTimeout(translationTimer);
 
-  let targetId = activeLiveCardId;
+  let targetId = activeRowId;
   if (!targetId) {
-    targetId = 'card_' + Date.now();
-    const card = document.createElement('div');
-    card.className = 'bubble-card live';
-    card.id = targetId;
-    card.innerHTML = `
-      <div class="bubble-time">${getCurrentTimeStr()}</div>
-      <div class="bubble-en">${escapeHtml(clean)}</div>
-      <div class="bubble-zh translating">正在即时同传...</div>
+    targetId = 'row_' + Date.now();
+    const row = document.createElement('div');
+    row.className = 'subtitle-row active';
+    row.id = targetId;
+    row.innerHTML = `
+      <div class="subtitle-en">${escapeHtml(clean)}</div>
+      <div class="subtitle-zh translating">正在翻译...</div>
     `;
-    streamContainer.appendChild(card);
+    streamContainer.appendChild(row);
   } else {
-    const card = document.getElementById(targetId);
-    if (card) {
-      card.querySelector('.bubble-en').innerText = clean;
+    const row = document.getElementById(targetId);
+    if (row) {
+      row.querySelector('.subtitle-en').innerText = clean;
     }
   }
 
-  // 解开活跃卡片锁，下一句将开辟新的卡片
-  activeLiveCardId = null;
+  activeRowId = null;
   triggerTranslation(targetId, clean);
   streamContainer.scrollTop = streamContainer.scrollHeight;
 }
 
 // -------------------------------------------------------------
-// 5. 学术大模型学术同传请求 (支持 Gemini / OpenAI 双路由)
+// 5. 学术大模型同传请求
 // -------------------------------------------------------------
-async function triggerTranslation(cardId, englishText) {
-  const card = document.getElementById(cardId);
-  if (!card) return;
+async function triggerTranslation(rowId, englishText) {
+  const row = document.getElementById(rowId);
+  if (!row) return;
 
-  const zhElem = card.querySelector('.bubble-zh');
+  const zhElem = row.querySelector('.subtitle-zh');
 
   if (!API_KEY) {
-    zhElem.innerText = "【未配置 API Key，请点击下方配置】";
+    zhElem.innerText = "【未配置 API Key，请在底部设置】";
     zhElem.classList.remove('translating');
-    saveToHistory(card.querySelector('.bubble-time').innerText, englishText, zhElem.innerText);
+    row.classList.remove('active');
+    saveToHistory(getCurrentTimeStr(), englishText, zhElem.innerText);
     return;
   }
-
-  const promptSystem = "你是一名顶尖的大学全英文课堂学术同传译员。将讲师的英文实时翻译为流畅、简明、贴合大学哲学、商科语境的地道中文。严禁任何说明或多余废话，直接输出中文翻译。";
 
   try {
     let translated = "";
@@ -648,7 +639,7 @@ async function triggerTranslation(cardId, englishText) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [
-            { role: 'user', parts: [{ text: `${promptSystem}\n\n讲师原句: "${englishText}"` }] }
+            { role: 'user', parts: [{ text: `Instructions: Translate the English speech into natural Simplified Chinese directly without comments.\n\nEnglish: "${englishText}"` }] }
           ]
         })
       });
@@ -657,9 +648,9 @@ async function triggerTranslation(cardId, englishText) {
       if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) {
         translated = data.candidates[0].content.parts[0].text.trim();
       } else if (data.error) {
-        translated = `Gemini报错: ${data.error.message || JSON.stringify(data.error)}`;
+        translated = `报错: ${data.error.message || JSON.stringify(data.error)}`;
       } else {
-        translated = `解析异常: ${JSON.stringify(data).slice(0, 80)}`;
+        translated = `异常: ${JSON.stringify(data).slice(0, 50)}`;
       }
     } else {
       // OpenAI / 第三方中转格式
@@ -700,14 +691,16 @@ async function triggerTranslation(cardId, englishText) {
 
     zhElem.innerText = translated;
     zhElem.classList.remove('translating');
-    card.classList.remove('live');
+    row.classList.remove('active');
     streamContainer.scrollTop = streamContainer.scrollHeight;
-    saveToHistory(card.querySelector('.bubble-time').innerText, englishText, translated);
+    saveToHistory(getCurrentTimeStr(), englishText, translated);
   } catch (err) {
     console.error("Translation fail:", err);
     zhElem.innerText = `网络异常: ${err.message || '跨域或断网'}`;
     zhElem.classList.remove('translating');
+    row.classList.remove('active');
   }
+}
 }
 
 function saveToHistory(timeStr, en, zh) {
