@@ -231,7 +231,12 @@
     background: rgba(224, 82, 82, 0.12);
     border: 1px solid rgba(224, 82, 82, 0.4);
     color: var(--danger);
-    flex: 0 0 90px;
+  }
+
+  .btn-secondary {
+    background: #1e2430;
+    border: 1px solid #323b4b;
+    color: var(--text-secondary);
   }
 
   .config-bar {
@@ -330,8 +335,11 @@
     <button class="btn btn-warning" id="btnPause" style="display:none;">
       <span>暂停</span>
     </button>
+    <button class="btn btn-secondary" id="btnStopNoDownload" style="display:none;">
+      <span>结束 (不保存)</span>
+    </button>
     <button class="btn btn-danger" id="btnStop" style="display:none;">
-      <span>结束归档</span>
+      <span>结束并导出</span>
     </button>
   </div>
   <div class="config-bar">
@@ -394,6 +402,7 @@ const streamContainer = document.getElementById('stream-container');
 const btnMainAction = document.getElementById('btnMainAction');
 const btnMainText = document.getElementById('btnMainText');
 const btnPause = document.getElementById('btnPause');
+const btnStopNoDownload = document.getElementById('btnStopNoDownload');
 const btnStop = document.getElementById('btnStop');
 const statusDot = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
@@ -693,9 +702,15 @@ btnPause.addEventListener('click', () => {
   else pauseSession();
 });
 
+btnStopNoDownload.addEventListener('click', () => {
+  if (confirm("确定结束本次听课吗？（不下载文档，页面将保留当前记录）")) {
+    stopSession(false);
+  }
+});
+
 btnStop.addEventListener('click', () => {
-  if (confirm("是否结束当前课程录制并导出整篇中英文双语档案？")) {
-    stopAndExportSession();
+  if (confirm("是否结束当前课程并下载整篇双语笔记文档？")) {
+    stopSession(true);
   }
 });
 
@@ -714,6 +729,7 @@ function startSession() {
 
   btnMainAction.style.display = 'none';
   btnPause.style.display = 'flex';
+  btnStopNoDownload.style.display = 'flex';
   btnStop.style.display = 'flex';
   btnPause.innerHTML = '<span>暂停</span>';
 }
@@ -742,7 +758,7 @@ function resumeSession() {
   btnPause.classList.add('btn-warning');
 }
 
-function stopAndExportSession() {
+function stopSession(shouldExport = false) {
   isRecording = false;
   isPaused = false;
   clearInterval(timerInterval);
@@ -753,14 +769,17 @@ function stopAndExportSession() {
   }
 
   statusDot.className = 'status-dot';
-  statusText.innerText = '已归档';
+  statusText.innerText = shouldExport ? '已归档导出' : '已结束';
 
   btnMainAction.style.display = 'flex';
   btnPause.style.display = 'none';
+  btnStopNoDownload.style.display = 'none';
   btnStop.style.display = 'none';
-  btnMainText.innerText = '重新开始听课';
+  btnMainText.innerText = '继续 / 重新开始';
 
-  exportTextArchive();
+  if (shouldExport) {
+    exportTextArchive();
+  }
 }
 
 function exportTextArchive() {
