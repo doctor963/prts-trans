@@ -192,23 +192,27 @@
   .control-grid {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
+    width: 100%;
   }
 
   .btn {
     flex: 1;
-    height: 48px;
+    min-width: 0;
+    height: 44px;
+    padding: 0 4px;
     border-radius: 6px;
     border: none;
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 600;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.2px;
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 6px;
+    gap: 4px;
     cursor: pointer;
     transition: all 0.2s;
+    white-space: nowrap;
   }
 
   .btn:active {
@@ -336,10 +340,10 @@
       <span>暂停</span>
     </button>
     <button class="btn btn-secondary" id="btnStopNoDownload" style="display:none;">
-      <span>结束 (不保存)</span>
+      <span>仅结束</span>
     </button>
     <button class="btn btn-danger" id="btnStop" style="display:none;">
-      <span>结束并导出</span>
+      <span>结束并保存</span>
     </button>
   </div>
   <div class="config-bar">
@@ -580,21 +584,21 @@ function handleTranscriptUpdate(finalText, interimText) {
     return;
   }
 
-  // 3. 静默断句缩短到 500ms，短句换气即出
+  // 3. 静默断句：短句换气即出
   clearTimeout(translationTimer);
   translationTimer = setTimeout(() => {
     if (currentCardId) {
       const card = document.getElementById(currentCardId);
       if (card) {
         const enText = card.querySelector('.bubble-en').innerText.trim();
-        if (enText.length >= 5) {
+        if (enText.length >= 4) {
           const cid = currentCardId;
           currentCardId = null;
           triggerTranslation(cid, enText);
         }
       }
     }
-  }, 500);
+  }, 450);
 }
 
 // -------------------------------------------------------------
@@ -681,6 +685,7 @@ async function triggerTranslation(cardId, englishText) {
     zhElem.innerText = translated;
     zhElem.classList.remove('translating');
     card.classList.remove('live');
+    streamContainer.scrollTop = streamContainer.scrollHeight;
     saveToHistory(card.querySelector('.bubble-time').innerText, englishText, translated);
   } catch (err) {
     console.error("Translation fail:", err);
