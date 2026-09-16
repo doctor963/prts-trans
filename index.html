@@ -489,17 +489,19 @@ function createRecognitionInstance() {
     if (isPaused) return;
 
     let interimTranscript = '';
-    let finalTranscript = '';
 
     for (let i = event.resultIndex; i < event.results.length; ++i) {
+      const piece = event.results[i][0].transcript;
       if (event.results[i].isFinal) {
-        finalTranscript += event.results[i][0].transcript;
+        handleFinalSentence(piece);
       } else {
-        interimTranscript += event.results[i][0].transcript;
+        interimTranscript += piece;
       }
     }
 
-    handleTranscriptUpdate(finalTranscript, interimTranscript);
+    if (interimTranscript) {
+      handleInterimUpdate(interimTranscript);
+    }
   };
 
   sr.onerror = (event) => {
@@ -533,72 +535,86 @@ function createRecognitionInstance() {
 }
 
 // -------------------------------------------------------------
-// 4. 双语卡片展示与意群快速断句 (说一句、翻一句)
+// 4. 双语卡片流转与去重断句 (说一句、翻一句，不再滚重复气泡)
 // -------------------------------------------------------------
 function getCurrentTimeStr() {
   const now = new Date();
   return now.toTimeString().split(' ')[0];
 }
 
-function handleTranscriptUpdate(finalText, interimText) {
-  const textToShow = (finalText || interimText).trim();
-  if (!textToShow) return;
+let activeLiveCardId = null;
 
-  if (!currentCardId) {
-    currentCardId = 'card_' + Date.now();
+// 当讲师正在说某句话时的临时展示（只在一个活跃气泡内刷新文字，绝不新建气泡）
+function handleInterimUpdate(text) {
+  const clean = text.trim();
+  if (!clean) return;
+
+  if (!activeLiveCardId) {
+    activeLiveCardId = 'card_' + Date.now();
     const card = document.createElement('div');
     card.className = 'bubble-card live';
-    card.id = currentCardId;
+    card.id = activeLiveCardId;
     card.innerHTML = `
       <div class="bubble-time">${getCurrentTimeStr()}</div>
-      <div class="bubble-en">${escapeHtml(textToShow)}</div>
-      <div class="bubble-zh translating">正在即时同传...</div>
+      <div class="bubble-en">${escapeHtml(clean)}</div>
+      <div class="bubble-zh translating">正在聆听...</div>
     `;
     streamContainer.appendChild(card);
-    streamContainer.scrollTop = streamContainer.scrollHeight;
   } else {
-    const card = document.getElementById(currentCardId);
+    const card = document.getElementById(activeLiveCardId);
     if (card) {
-      card.querySelector('.bubble-en').innerText = textToShow;
-      streamContainer.scrollTop = streamContainer.scrollHeight;
+      card.querySelector('.bubble-en').innerText = clean;
     }
   }
+  streamContainer.scrollTop = streamContainer.scrollHeight;
 
-  // 1. Web Speech 确定完整断句 (finalText) 时，立即触发翻译
-  if (finalText) {
-    const cid = currentCardId;
-    const text = finalText.trim();
-    currentCardId = null;
-    clearTimeout(translationTimer);
-    triggerTranslation(cid, text);
-    return;
-  }
-
-  // 2. 标点符号即时断句（句号、问号、感叹号）：无需等待静默
-  if (/[.?!]\s*$/.test(interimText.trim()) && interimText.trim().split(/\s+/).length >= 3) {
-    const cid = currentCardId;
-    const text = interimText.trim();
-    currentCardId = null;
-    clearTimeout(translationTimer);
-    triggerTranslation(cid, text);
-    return;
-  }
-
-  // 3. 静默断句：短句换气即出
+  // 如果讲师中间换气停顿 (600ms)，将当前这句定稿并翻译，然后释放气泡锁定
   clearTimeout(translationTimer);
   translationTimer = setTimeout(() => {
-    if (currentCardId) {
-      const card = document.getElementById(currentCardId);
+    if (activeLiveCardId) {
+      const card = document.getElementById(activeLiveCardId);
       if (card) {
         const enText = card.querySelector('.bubble-en').innerText.trim();
         if (enText.length >= 4) {
-          const cid = currentCardId;
-          currentCardId = null;
-          triggerTranslation(cid, enText);
+          const targetId = activeLiveCardId;
+          activeLiveCardId = null;
+          triggerTranslation(targetId, enText);
         }
       }
     }
-  }, 450);
+  }, 600);
+}
+
+// 当系统确定是一句完整的句子时：定稿翻译并解锁下一个气泡
+function handleFinalSentence(sentence) {
+  const clean = sentence.trim();
+  if (!clean) return;
+
+  clearTimeout(translationTimer);
+
+  let targetId = activeLiveCardId;
+  if (!targetId) {
+    targetId = 'card_' + Date.now();
+    const card = document.createElement('div');
+    card.className = 'bubble-card live';
+    card.id = targetId;
+    card.innerHTML = `
+      <div class="bubble-time">${getCurrentTimeStr()}</div>
+      <div class="bubble-en">${escapeHtml(clean)}</div>
+      <div class="bubble-zh translating">正在即时同传...</div>
+    `;
+    streamContainer.appendChild(card);
+  } else {
+    const card = document.getElementById(targetId);
+    if (card) {
+      card.querySelector('.bubble-en').innerText = clean;
+    }
+  }
+
+  // 解开活跃卡片锁，下一句将开辟新的卡片
+  activeLiveCardId = null;
+  triggerTranslation(targetId, clean);
+  streamContainer.scrollTop = streamContainer.scrollHeight;
 }
 
 // -------------------------------------------------------------
