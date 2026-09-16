@@ -568,7 +568,7 @@ function getCurrentTimeStr() {
 }
 
 // -------------------------------------------------------------
-// 4. 分屏连续流转引擎 (彻底告别气泡断句，上下全屏双流自适应延伸)
+// 4. 分屏实时增量同传引擎（不等讲完，边说边切词组送翻）
 // -------------------------------------------------------------
 const enPane = document.getElementById('enPane');
 const zhPane = document.getElementById('zhPane');
@@ -578,39 +578,46 @@ const zhConfirmedElem = document.getElementById('zhConfirmed');
 const zhPendingElem = document.getElementById('zhPending');
 const zhStatus = document.getElementById('zhStatus');
 
-let accumulatedConfirmedEn = ''; // 已确认英文文本
+let accumulatedConfirmedEn = ''; // 已确认英文总文本
+let lastRawFinal = '';           // 上一次 final 文本快照
 let translatedEnLength = 0;       // 已翻译的英文长度游标
-let isTranslating = false;        // 翻译请求并发锁
-let translationQueue = [];        // 待翻译文本队列
+let isTranslating = false;        // 翻译并发锁
 
 function handleSpeechStream(totalFinal, totalInterim) {
-  // 1. 实时更新英文上半屏
-  // 如果识别引擎返回了新的定稿增量
-  if (totalFinal.length > accumulatedConfirmedEn.length) {
+  // 1. 上半屏：实时反映正在说的英文（已定稿 + 正在吐出的词）
+  if (totalFinal !== lastRawFinal) {
+    lastRawFinal = totalFinal;
     accumulatedConfirmedEn = totalFinal;
     enConfirmedElem.innerText = accumulatedConfirmedEn;
-    enInterimElem.innerText = '';
-    enPane.scrollTop = enPane.scrollHeight;
-
-    // 检查是否有未翻译的英文增量
-    checkAndTriggerTranslation();
-  } else {
-    // 正在说的临时词
-    enInterimElem.innerText = totalInterim ? (' ' + totalInterim) : '';
-    enPane.scrollTop = enPane.scrollHeight;
   }
+  enInterimElem.innerText = totalInterim ? (' ' + totalInterim) : '';
+  enPane.scrollTop = enPane.scrollHeight;
+
+  // 2. 实时同传调度：边说边翻
+  // 无论是在定稿还是在临时说话，只要尚未翻译的内容达到一个短语义块（约 6-8 个单词或遇到停顿/标点），立即送翻
+  dispatchIncrementalTranslation(totalFinal, totalInterim);
 }
 
-// 检查并调度翻译：只要新增英文超过一定长度，或有停顿，就送入翻译管道
-function checkAndTriggerTranslation() {
-  const untranslated = accumulatedConfirmedEn.slice(translatedEnLength).trim();
-  if (!untranslated) return;
+// 调度增量翻译
+function dispatchIncrementalTranslation(totalFinal, totalInterim) {
+  // 优先看已定稿中未翻部分
+  const confirmedUntranslated = accumulatedConfirmedEn.slice(translatedEnLength).trim();
+  
+  // 检查是否包含标点符号或词数已足够（>= 5个单词）
+  const words = confirmedUntranslated ? confirmedUntranslated.split(/\s+/) : [];
+  const hasPunctuation = /[.,?!;]/.test(confirmedUntranslated);
 
-  // 如果积累了至少 20 个字符（或两三个词），或者设置了防抖
+  if (words.length >= 6 || hasPunctuation) {
+    clearTimeout(translationTimer);
+    scheduleNextTranslationChunk();
+    return;
+  }
+
+  // 如果讲师语速平缓或有微小停顿 (350ms)，即使词数较少（>= 3个单词）也立即送翻
   clearTimeout(translationTimer);
   translationTimer = setTimeout(() => {
     scheduleNextTranslationChunk();
-  }, 400);
+  }, 350);
 }
 
 function scheduleNextTranslationChunk() {
@@ -619,36 +626,40 @@ function scheduleNextTranslationChunk() {
   const untranslated = accumulatedConfirmedEn.slice(translatedEnLength).trim();
   if (!untranslated || untranslated.length < 3) return;
 
+  // 截取当前待翻译增量
   const chunkToTranslate = untranslated;
   const chunkLength = accumulatedConfirmedEn.length - translatedEnLength;
 
   isTranslating = true;
-  zhStatus.innerText = "正在同传...";
+  zhStatus.innerText = "同传中...";
   zhPendingElem.innerText = " ●";
 
   triggerStreamTranslation(chunkToTranslate)
     .then((chineseText) => {
-      if (chineseText) {
-        // 中文下半屏持续追加
+      if (chineseText && !chineseText.startsWith('[')) {
+        // 中文下半屏平滑追加
         const spacer = zhConfirmedElem.innerText.length > 0 ? ' ' : '';
         zhConfirmedElem.innerText += (spacer + chineseText);
         zhPane.scrollTop = zhPane.scrollHeight;
 
         translatedEnLength += chunkLength;
         saveToHistory(getCurrentTimeStr(), chunkToTranslate, chineseText);
+      } else if (chineseText && chineseText.startsWith('[')) {
+        // 报错或提示
+        zhStatus.innerText = chineseText;
       }
     })
     .catch((err) => {
-      console.error("Translation stream error:", err);
+      console.error("Translation error:", err);
     })
     .finally(() => {
       isTranslating = false;
       zhStatus.innerText = "准备就绪";
       zhPendingElem.innerText = "";
 
-      // 如果翻译期间讲师又说了新的内容，立即紧跟继续翻
-      if (accumulatedConfirmedEn.length > translatedEnLength) {
-        setTimeout(scheduleNextTranslationChunk, 100);
+      // 如果翻译执行期间又有新积累的词，无缝接续翻译
+      if (accumulatedConfirmedEn.length - translatedEnLength >= 4) {
+        setTimeout(scheduleNextTranslationChunk, 80);
       }
     });
 }
