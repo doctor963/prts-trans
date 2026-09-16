@@ -480,20 +480,18 @@ function createRecognitionInstance() {
   sr.onresult = (event) => {
     if (isPaused) return;
 
-    let interimTranscript = '';
+    let totalFinal = '';
+    let totalInterim = '';
 
-    for (let i = event.resultIndex; i < event.results.length; ++i) {
-      const piece = event.results[i][0].transcript;
+    for (let i = 0; i < event.results.length; ++i) {
       if (event.results[i].isFinal) {
-        handleFinalSentence(piece);
+        totalFinal += event.results[i][0].transcript + ' ';
       } else {
-        interimTranscript += piece;
+        totalInterim += event.results[i][0].transcript;
       }
     }
 
-    if (interimTranscript) {
-      handleInterimUpdate(interimTranscript);
-    }
+    handleSpeechStream(totalFinal, totalInterim);
   };
 
   sr.onerror = (event) => {
@@ -535,78 +533,81 @@ function getCurrentTimeStr() {
 }
 
 // -------------------------------------------------------------
-// 4. 双语同传字幕长卷 (小艺/豆包同款：无气泡、双语流式推进)
+// 4. 连续双语同传流（小艺/豆包同传模式：不中断、去重追加、实时双语）
 // -------------------------------------------------------------
-let activeRowId = null;
+let processedFinalLength = 0;
+let currentDraftRowId = null;
 
-// 当讲师正在吐词（正在说眼下这句）
-function handleInterimUpdate(text) {
-  const clean = text.trim();
-  if (!clean) return;
+function handleSpeechStream(totalFinal, totalInterim) {
+  // 1. 处理新增的已定稿英文 (final text)
+  if (totalFinal.length > processedFinalLength) {
+    const newlyConfirmed = totalFinal.slice(processedFinalLength).trim();
+    processedFinalLength = totalFinal.length;
 
-  if (!activeRowId) {
-    activeRowId = 'row_' + Date.now();
-    const row = document.createElement('div');
-    row.className = 'subtitle-row active';
-    row.id = activeRowId;
-    row.innerHTML = `
-      <div class="subtitle-en">${escapeHtml(clean)}</div>
-      <div class="subtitle-zh translating">正在翻译...</div>
-    `;
-    streamContainer.appendChild(row);
-  } else {
-    const row = document.getElementById(activeRowId);
-    if (row) {
-      row.querySelector('.subtitle-en').innerText = clean;
-    }
-  }
-  streamContainer.scrollTop = streamContainer.scrollHeight;
-
-  // 停顿短暂停歇时触发翻译
-  clearTimeout(translationTimer);
-  translationTimer = setTimeout(() => {
-    if (activeRowId) {
-      const row = document.getElementById(activeRowId);
-      if (row) {
-        const enText = row.querySelector('.subtitle-en').innerText.trim();
-        if (enText.length >= 4) {
-          const targetId = activeRowId;
-          activeRowId = null;
-          triggerTranslation(targetId, enText);
+    if (newlyConfirmed) {
+      // 若当前有草稿行，直接复用当前草稿行作为这句定稿行
+      let targetRowId = currentDraftRowId;
+      if (!targetRowId) {
+        targetRowId = 'row_' + Date.now();
+        const row = document.createElement('div');
+        row.className = 'subtitle-row active';
+        row.id = targetRowId;
+        row.innerHTML = `
+          <div class="subtitle-en">${escapeHtml(newlyConfirmed)}</div>
+          <div class="subtitle-zh translating">正在翻译...</div>
+        `;
+        streamContainer.appendChild(row);
+      } else {
+        const row = document.getElementById(targetRowId);
+        if (row) {
+          row.querySelector('.subtitle-en').innerText = newlyConfirmed;
         }
       }
-    }
-  }, 500);
-}
 
-// 讲师一句话完成定稿
-function handleFinalSentence(sentence) {
-  const clean = sentence.trim();
-  if (!clean) return;
-
-  clearTimeout(translationTimer);
-
-  let targetId = activeRowId;
-  if (!targetId) {
-    targetId = 'row_' + Date.now();
-    const row = document.createElement('div');
-    row.className = 'subtitle-row active';
-    row.id = targetId;
-    row.innerHTML = `
-      <div class="subtitle-en">${escapeHtml(clean)}</div>
-      <div class="subtitle-zh translating">正在翻译...</div>
-    `;
-    streamContainer.appendChild(row);
-  } else {
-    const row = document.getElementById(targetId);
-    if (row) {
-      row.querySelector('.subtitle-en').innerText = clean;
+      currentDraftRowId = null;
+      clearTimeout(translationTimer);
+      triggerTranslation(targetRowId, newlyConfirmed);
+      streamContainer.scrollTop = streamContainer.scrollHeight;
     }
   }
 
-  activeRowId = null;
-  triggerTranslation(targetId, clean);
-  streamContainer.scrollTop = streamContainer.scrollHeight;
+  // 2. 处理当前正在说的临时英文 (interim text)
+  const draftText = totalInterim.trim();
+  if (draftText) {
+    if (!currentDraftRowId) {
+      currentDraftRowId = 'draft_' + Date.now();
+      const row = document.createElement('div');
+      row.className = 'subtitle-row active';
+      row.id = currentDraftRowId;
+      row.innerHTML = `
+        <div class="subtitle-en">${escapeHtml(draftText)}</div>
+        <div class="subtitle-zh translating">正在聆听...</div>
+      `;
+      streamContainer.appendChild(row);
+    } else {
+      const row = document.getElementById(currentDraftRowId);
+      if (row) {
+        row.querySelector('.subtitle-en').innerText = draftText;
+      }
+    }
+    streamContainer.scrollTop = streamContainer.scrollHeight;
+
+    // 停顿 600ms 快速触发这一小句的同传
+    clearTimeout(translationTimer);
+    translationTimer = setTimeout(() => {
+      if (currentDraftRowId) {
+        const row = document.getElementById(currentDraftRowId);
+        if (row) {
+          const en = row.querySelector('.subtitle-en').innerText.trim();
+          if (en.length >= 4) {
+            const cid = currentDraftRowId;
+            currentDraftRowId = null;
+            triggerTranslation(cid, en);
+          }
+        }
+      }
+    }, 600);
+  }
 }
 
 // -------------------------------------------------------------
